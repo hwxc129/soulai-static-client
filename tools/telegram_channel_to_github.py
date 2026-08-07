@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import html
 import json
 import logging
 import os
@@ -74,6 +75,7 @@ class Config:
     path_prefix: str
     state_file: Path
     github_state_path: str | None
+    notify_chat_id: int | None
     poll_timeout: int
     once: bool
     dry_run: bool
@@ -116,6 +118,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--path-prefix", default="telegram-posts", help="Directory for generated Markdown files")
     parser.add_argument("--state-file", default=".runtime/telegram-github-state.json", help="Local idempotency state file")
     parser.add_argument("--github-state-path", help="Optional repository file for persistent update state; required for stateless runners")
+    parser.add_argument("--notify-chat-id", type=int, help="Optional Telegram chat/user ID to notify after a successful archive")
     parser.add_argument("--poll-timeout", type=int, default=45, choices=range(1, 51), metavar="SECONDS", help="Telegram long-poll timeout")
     parser.add_argument("--once", action="store_true", help="Process one Telegram response, then exit")
     parser.add_argument("--dry-run", action="store_true", help="Print planned GitHub writes without sending requests or writing state")
@@ -151,6 +154,7 @@ def make_config(args: argparse.Namespace) -> Config:
         path_prefix=prefix,
         state_file=Path(args.state_file),
         github_state_path=github_state_path,
+        notify_chat_id=args.notify_chat_id,
         poll_timeout=args.poll_timeout,
         once=args.once,
         dry_run=args.dry_run,
@@ -271,13 +275,18 @@ def markdown_quote(text: str) -> str:
     return "\n".join(">" if not line else f"> {line}" for line in clipped.splitlines())
 
 
-def markdown_title(text: str, message_id: int) -> str:
-    """Create a safe, compact H1 title from the first non-empty text line."""
+def post_title(text: str, message_id: int) -> str:
+    """Create a compact title from the first non-empty text line."""
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
     compact = re.sub(r"\s+", " ", first_line)[:80]
     if not compact:
         return f"频道消息 #{message_id}"
-    return re.sub(r"([\\`*_{}\[\]<>#+.!|~-])", r"\\\1", compact)
+    return compact
+
+
+def markdown_title(text: str, message_id: int) -> str:
+    """Escape a compact title for use as a Markdown H1."""
+    return re.sub(r"([\\`*_{}\[\]<>#+.!|~-])", r"\\\1", post_title(text, message_id))
 
 
 def post_path(config: Config, message: dict[str, Any]) -> str:
@@ -412,6 +421,28 @@ def save_state(config: Config, next_offset: int) -> None:
         save_local_state(config.state_file, next_offset, dry_run=config.dry_run)
 
 
+def notify_archive_success(config: Config, message: dict[str, Any], file_path: str) -> None:
+    """Send a concise HTML notification after GitHub has accepted the archive."""
+    if config.notify_chat_id is None:
+        return
+    message_id = int(message["message_id"])
+    title = html.escape(post_title(message_text(message), message_id))
+    url = f"https://github.com/{config.repository}/blob/{quote(config.branch, safe='')}/{quote(file_path, safe='/')}"
+    text = (
+        "<b>频道内容已自动归档</b>\n"
+        f"标题：<code>{title}</code>\n"
+        "来源：自动化采集频道发送\n"
+        f'<a href="{html.escape(url, quote=True)}">在 GitHub 查看</a>'
+    )
+    telegram_call(
+        config,
+        "sendMessage",
+        {"chat_id": config.notify_chat_id, "text": text, "parse_mode": "HTML"},
+        timeout=30,
+    )
+    logging.info("sent archive notification for channel message %s", message_id)
+
+
 def archive_channel_post(config: Config, message: dict[str, Any], summary: Summary) -> None:
     message_id = int(message.get("message_id", 0))
     if has_media(message):
@@ -437,10 +468,12 @@ def archive_channel_post(config: Config, message: dict[str, Any], summary: Summa
     if github_get_file(config, file_path) is not None:
         summary.already_exists += 1
         logging.info("GitHub file already exists for channel message %s", message_id)
+        notify_archive_success(config, message, file_path)
         return
     create_github_file(config, file_path, render_markdown(message), message_id)
     summary.created += 1
     logging.info("archived channel message %s to %s", message_id, file_path)
+    notify_archive_success(config, message, file_path)
 
 
 def get_updates(config: Config, next_offset: int) -> list[dict[str, Any]]:

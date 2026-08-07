@@ -29,6 +29,7 @@ jobs:
           fi
           python3 tools/telegram_channel_to_github.py \
             --channel-id -1002621410281 \
+            --notify-chat-id 7244416496 \
             --repo "$GITHUB_REPOSITORY" \
             --github-state-path "telegram-posts/.sync-state.json" \
             --once

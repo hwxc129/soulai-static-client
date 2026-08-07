@@ -10,6 +10,7 @@
 - 私钥、Telegram/GitHub/AWS 令牌、疑似 API 密钥、邮箱、手机号和中国身份证号会阻止自动公开；
 - 每篇归档均带有“看么科技客服 @hwxc129 / 看么科技频道 @hwxc131”页脚；
 - 每篇归档标题自动取频道正文的第一行，并标记为“自动化采集频道发送”；
+- 每篇成功写入 GitHub 的归档会通过 Bot 通知指定 Telegram 用户；
 - 使用本地状态文件和固定的 `message_id` 路径去重；重复运行不会覆盖已归档消息；
 - GitHub 写入串行执行，避免 Contents API 的并发冲突。
 
@@ -60,6 +61,8 @@ python3 tools/telegram_channel_to_github.py \
 该自动任务会把 Update 偏移量写入 `telegram-posts/.sync-state.json`，其中不含 Bot Token、频道正文或用户资料；这样临时 Runner 在下一轮仍能从正确位置继续。首次运行只会处理 Bot 已收到的未确认频道更新。
 
 只需在仓库 **Settings → Secrets and variables → Actions** 中设置名为 `TELEGRAM_BOT_TOKEN` 的 Secret。没有该 Secret 时任务会安全跳过，不会读取或发布内容。GitHub 的定时任务最短为每 5 分钟，繁忙时可能延迟；公共仓库连续 60 天无活动时会自动停用定时任务，因此对实时性或长期稳定性有要求时，应使用服务器部署方案。[GitHub Actions 定时任务说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
+成功归档后，Bot 会向已配置的通知用户发送 GitHub 链接。请先在 Telegram 中向该 Bot 发送一次 `/start`；否则 Telegram 不允许 Bot 主动私聊该用户，任务会保留未确认 Update 并在下一轮重试。
 
 ## 运维说明
 
