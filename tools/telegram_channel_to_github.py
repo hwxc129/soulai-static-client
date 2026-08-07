@@ -271,6 +271,15 @@ def markdown_quote(text: str) -> str:
     return "\n".join(">" if not line else f"> {line}" for line in clipped.splitlines())
 
 
+def markdown_title(text: str, message_id: int) -> str:
+    """Create a safe, compact H1 title from the first non-empty text line."""
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    compact = re.sub(r"\s+", " ", first_line)[:80]
+    if not compact:
+        return f"频道消息 #{message_id}"
+    return re.sub(r"([\\`*_{}\[\]<>#+.!|~-])", r"\\\1", compact)
+
+
 def post_path(config: Config, message: dict[str, Any]) -> str:
     message_id = int(message["message_id"])
     timestamp = datetime.fromtimestamp(int(message["date"]), tz=UTC)
@@ -282,10 +291,10 @@ def render_markdown(message: dict[str, Any]) -> str:
     message_id = int(message["message_id"])
     text = message_text(message)
     return (
-        f"# Telegram 频道消息 #{message_id}\n\n"
+        f"# {markdown_title(text, message_id)}\n\n"
         f"- 发布时间（UTC）：`{timestamp}`\n"
         "- 来源：Telegram 频道\n"
-        "- 发布方式：自动归档（已通过基础敏感信息检查）\n\n"
+        "- 发布方式：自动化采集频道发送（已通过基础敏感信息检查）\n\n"
         "## 内容\n\n"
         f"{markdown_quote(text)}\n\n"
         "---\n\n"
