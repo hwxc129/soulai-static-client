@@ -65,6 +65,10 @@ class ApiError(RuntimeError):
     """A remote API call failed without a safe retry path."""
 
 
+class ConflictError(ApiError):
+    """A GitHub Contents write raced with another commit."""
+
+
 @dataclass(frozen=True)
 class Config:
     bot_token: str | None
@@ -358,6 +362,8 @@ def github_put_file(
         payload=payload,
         allowed_statuses={409, 422},
     )
+    if status == 409:
+        raise ConflictError(f"GitHub conflicted while writing {file_path}")
     if status not in {200, 201}:
         raise ApiError(f"GitHub refused {file_path} with HTTP {status}; no update offset was advanced")
 
@@ -396,18 +402,27 @@ def save_github_state(config: Config, next_offset: int) -> None:
     if config.dry_run:
         logging.info("dry run: would advance GitHub update offset to %s", next_offset)
         return
-    existing = github_get_file(config, config.github_state_path)
-    existing_sha = existing.get("sha") if existing else None
     content = json.dumps(
         {"next_offset": next_offset, "updated_at": datetime.now(UTC).isoformat()}, indent=2
     ) + "\n"
-    github_put_file(
-        config,
-        config.github_state_path,
-        content,
-        "chore: advance Telegram sync offset",
-        sha=existing_sha,
-    )
+    for attempt in range(RETRY_COUNT + 1):
+        existing = github_get_file(config, config.github_state_path)
+        existing_sha = existing.get("sha") if existing else None
+        try:
+            github_put_file(
+                config,
+                config.github_state_path,
+                content,
+                "chore: advance Telegram sync offset",
+                sha=existing_sha,
+            )
+            return
+        except ConflictError:
+            if attempt == RETRY_COUNT:
+                raise
+            delay = RETRY_DELAY_SECONDS * (attempt + 1)
+            logging.warning("GitHub state write conflicted; retrying in %.1fs", delay)
+            time.sleep(delay)
 
 
 def load_state(config: Config) -> dict[str, int]:
