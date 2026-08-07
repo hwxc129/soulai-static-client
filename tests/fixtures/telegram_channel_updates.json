@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "result": [
+    {
+      "update_id": 1001,
+      "channel_post": {
+        "message_id": 42,
+        "date": 1785993600,
+        "chat": {
+          "id": -1001234567890,
+          "type": "channel",
+          "title": "测试频道"
+        },
+        "text": "这是一条可安全归档的频道更新。"
+      }
+    }
+  ]
+}

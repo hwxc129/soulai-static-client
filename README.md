@@ -63,6 +63,12 @@ python3 -m http.server 8080
 
 本仓库不包含后端、数据库、对象存储、支付配置或生产部署文件。如需后端开发、接口接入、环境配置或部署协助，请联系作者：看么科技客服 @hwxc129。
 
+## Telegram 频道自动同步
+
+已提供 [频道监听与 GitHub 归档工具](tools/telegram_channel_to_github.py)。它监听指定频道的新文本消息，并自动创建带有看么科技页脚的 Markdown 归档；含媒体、疑似密钥或个人信息的消息会默认阻止公开。
+
+使用前请将专用 Bot 添加为频道管理员，并为该仓库创建仅有 `Contents: Read and write` 权限的 GitHub fine-grained token。完整安装、演练和运维说明见 [docs/TELEGRAM_CHANNEL_SYNC.md](docs/TELEGRAM_CHANNEL_SYNC.md)。
+
 ## 安全与内容要求
 
 - 请勿提交 `.env`、私钥、令牌、支付参数、用户数据或生产导出文件；
