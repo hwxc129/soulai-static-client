@@ -1,0 +1,12 @@
+# Local development and secret material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+*.log
+node_modules/
+dist/
+.DS_Store
