@@ -73,6 +73,7 @@ class Config:
     branch: str
     path_prefix: str
     state_file: Path
+    github_state_path: str | None
     poll_timeout: int
     once: bool
     dry_run: bool
@@ -114,6 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--branch", default="main", help="Target Git branch")
     parser.add_argument("--path-prefix", default="telegram-posts", help="Directory for generated Markdown files")
     parser.add_argument("--state-file", default=".runtime/telegram-github-state.json", help="Local idempotency state file")
+    parser.add_argument("--github-state-path", help="Optional repository file for persistent update state; required for stateless runners")
     parser.add_argument("--poll-timeout", type=int, default=45, choices=range(1, 51), metavar="SECONDS", help="Telegram long-poll timeout")
     parser.add_argument("--once", action="store_true", help="Process one Telegram response, then exit")
     parser.add_argument("--dry-run", action="store_true", help="Print planned GitHub writes without sending requests or writing state")
@@ -130,6 +132,9 @@ def make_config(args: argparse.Namespace) -> Config:
         raise ValueError("--path-prefix must be a non-empty relative path")
     if args.fixture and not args.dry_run:
         raise ValueError("--fixture is only allowed with --dry-run so it cannot publish test data")
+    github_state_path = args.github_state_path.strip("/") if args.github_state_path else None
+    if github_state_path and any(part in {"", ".", ".."} for part in github_state_path.split("/")):
+        raise ValueError("--github-state-path must be a relative repository path")
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     github_token = os.environ.get("GITHUB_TOKEN")
     if not args.dry_run and not args.fixture:
@@ -145,6 +150,7 @@ def make_config(args: argparse.Namespace) -> Config:
         branch=args.branch,
         path_prefix=prefix,
         state_file=Path(args.state_file),
+        github_state_path=github_state_path,
         poll_timeout=args.poll_timeout,
         once=args.once,
         dry_run=args.dry_run,
@@ -222,7 +228,7 @@ def telegram_call(config: Config, method: str, payload: dict[str, Any], *, timeo
     return response.get("result")
 
 
-def load_state(path: Path) -> dict[str, int]:
+def load_local_state(path: Path) -> dict[str, int]:
     if not path.exists():
         return {"next_offset": 0}
     try:
@@ -233,7 +239,7 @@ def load_state(path: Path) -> dict[str, int]:
         raise ValueError(f"state file is invalid: {path}") from exc
 
 
-def save_state(path: Path, next_offset: int, *, dry_run: bool) -> None:
+def save_local_state(path: Path, next_offset: int, *, dry_run: bool) -> None:
     if dry_run:
         logging.info("dry run: would advance local update offset to %s", next_offset)
         return
@@ -298,21 +304,35 @@ def github_headers(token: str | None) -> dict[str, str]:
     }
 
 
-def github_file_exists(config: Config, file_path: str) -> bool:
+def github_get_file(config: Config, file_path: str) -> dict[str, Any] | None:
     encoded_path = quote(file_path, safe="/")
     url = f"{GITHUB_API}/repos/{config.repository}/contents/{encoded_path}?ref={quote(config.branch, safe='')}"
-    status, _body = http_json(url, headers=github_headers(config.github_token), allowed_statuses={404})
-    return status == 200
+    status, body = http_json(url, headers=github_headers(config.github_token), allowed_statuses={404})
+    if status == 404:
+        return None
+    if not isinstance(body, dict) or body.get("type") != "file":
+        raise ApiError(f"GitHub returned an unexpected response for {file_path}")
+    return body
 
 
-def create_github_file(config: Config, file_path: str, content: str, message_id: int) -> None:
+def github_put_file(
+    config: Config,
+    file_path: str,
+    content: str,
+    commit_message: str,
+    *,
+    sha: str | None = None,
+) -> None:
+    """Create or replace one repository file, serially and with an optional SHA."""
     encoded_path = quote(file_path, safe="/")
     url = f"{GITHUB_API}/repos/{config.repository}/contents/{encoded_path}"
-    payload = {
-        "message": f"docs: archive Telegram post {message_id}",
+    payload: dict[str, Any] = {
+        "message": commit_message,
         "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
         "branch": config.branch,
     }
+    if sha:
+        payload["sha"] = sha
     status, _body = http_json(
         url,
         method="PUT",
@@ -322,6 +342,65 @@ def create_github_file(config: Config, file_path: str, content: str, message_id:
     )
     if status not in {200, 201}:
         raise ApiError(f"GitHub refused {file_path} with HTTP {status}; no update offset was advanced")
+
+
+def create_github_file(config: Config, file_path: str, content: str, message_id: int) -> None:
+    github_put_file(config, file_path, content, f"docs: archive Telegram post {message_id}")
+
+
+def decode_github_file(file_data: dict[str, Any], file_path: str) -> str:
+    try:
+        content = file_data["content"].replace("\n", "")
+        return base64.b64decode(content).decode("utf-8")
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:
+        raise ApiError(f"GitHub state file is not valid UTF-8 JSON: {file_path}") from exc
+
+
+def load_github_state(config: Config) -> dict[str, int]:
+    if not config.github_state_path:
+        return {"next_offset": 0}
+    if config.dry_run:
+        logging.info("dry run: would read GitHub state from %s", config.github_state_path)
+        return {"next_offset": 0}
+    file_data = github_get_file(config, config.github_state_path)
+    if file_data is None:
+        return {"next_offset": 0}
+    try:
+        data = json.loads(decode_github_file(file_data, config.github_state_path))
+        return {"next_offset": max(int(data.get("next_offset", 0)), 0)}
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise ApiError(f"GitHub state file is invalid: {config.github_state_path}") from exc
+
+
+def save_github_state(config: Config, next_offset: int) -> None:
+    if not config.github_state_path:
+        return
+    if config.dry_run:
+        logging.info("dry run: would advance GitHub update offset to %s", next_offset)
+        return
+    existing = github_get_file(config, config.github_state_path)
+    existing_sha = existing.get("sha") if existing else None
+    content = json.dumps(
+        {"next_offset": next_offset, "updated_at": datetime.now(UTC).isoformat()}, indent=2
+    ) + "\n"
+    github_put_file(
+        config,
+        config.github_state_path,
+        content,
+        "chore: advance Telegram sync offset",
+        sha=existing_sha,
+    )
+
+
+def load_state(config: Config) -> dict[str, int]:
+    return load_github_state(config) if config.github_state_path else load_local_state(config.state_file)
+
+
+def save_state(config: Config, next_offset: int) -> None:
+    if config.github_state_path:
+        save_github_state(config, next_offset)
+    else:
+        save_local_state(config.state_file, next_offset, dry_run=config.dry_run)
 
 
 def archive_channel_post(config: Config, message: dict[str, Any], summary: Summary) -> None:
@@ -346,7 +425,7 @@ def archive_channel_post(config: Config, message: dict[str, Any], summary: Summa
         summary.created += 1
         logging.info("dry run: would create %s for channel message %s", file_path, message_id)
         return
-    if github_file_exists(config, file_path):
+    if github_get_file(config, file_path) is not None:
         summary.already_exists += 1
         logging.info("GitHub file already exists for channel message %s", message_id)
         return
@@ -388,7 +467,7 @@ def ensure_polling_is_available(config: Config) -> None:
 
 def run(config: Config) -> Summary:
     ensure_polling_is_available(config)
-    state = load_state(config.state_file)
+    state = load_state(config)
     summary = Summary()
     last_health_log = time.monotonic()
 
@@ -407,7 +486,7 @@ def run(config: Config) -> Summary:
             else:
                 archive_channel_post(config, message, summary)
             state["next_offset"] = update_id + 1
-            save_state(config.state_file, state["next_offset"], dry_run=config.dry_run)
+            save_state(config, state["next_offset"])
 
         if config.once or config.fixture:
             break

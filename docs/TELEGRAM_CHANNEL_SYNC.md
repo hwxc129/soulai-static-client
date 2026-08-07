@@ -52,11 +52,20 @@ python3 tools/telegram_channel_to_github.py \
 
 不要把令牌填进命令行、日志、截图或 Git 提交。程序会每 45 秒长轮询一次；建议交给 systemd、Docker 或其他具备自动重启能力的运行环境托管。终止信号会在当前请求结束后安全退出。
 
+## 已配置的 GitHub Actions 自动任务
+
+仓库内的 `.github/workflows/telegram-channel-sync.yml` 已设置为每 5 分钟检查频道 `-1002621410281`。它使用 GitHub 自动提供的 `GITHUB_TOKEN` 写入本仓库，不需要额外创建 GitHub PAT。
+
+该自动任务会把 Update 偏移量写入 `telegram-posts/.sync-state.json`，其中不含 Bot Token、频道正文或用户资料；这样临时 Runner 在下一轮仍能从正确位置继续。首次运行只会处理 Bot 已收到的未确认频道更新。
+
+只需在仓库 **Settings → Secrets and variables → Actions** 中设置名为 `TELEGRAM_BOT_TOKEN` 的 Secret。没有该 Secret 时任务会安全跳过，不会读取或发布内容。GitHub 的定时任务最短为每 5 分钟，繁忙时可能延迟；公共仓库连续 60 天无活动时会自动停用定时任务，因此对实时性或长期稳定性有要求时，应使用服务器部署方案。[GitHub Actions 定时任务说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)
+
 ## 运维说明
 
 - `--once`：只取一批更新后退出，适合定时任务和排查；
 - `--state-file`：默认 `.runtime/telegram-github-state.json`，保存下一条 Update 偏移量，已被 `.gitignore` 忽略；
 - `--path-prefix`：默认 `telegram-posts`，可更改归档目录；
+- `--github-state-path`：将去重偏移量保存到仓库，适合 GitHub Actions 等无持久磁盘的 Runner；
 - `--dry-run`：验证配置和内容规则但不写 GitHub；
 - `--fixture`：只能与 `--dry-run` 一起使用，避免测试数据被公开；
 - 如改错频道 ID，可停止程序、检查状态文件后按需移除该本地状态文件，再重新启动。不要删除 GitHub 已归档的历史文件。
